@@ -42,30 +42,42 @@ export default function App() {
     setError("");
 
     try {
-      /*
-        IMPORTANT:
-
-        We are NOT directly calling Reddit here because
-        the browser was blocked by Reddit's CORS policy.
-
-        Our backend will call Reddit for us.
-      */
-
       const response = await fetch(
-        `/api/reddit/${encodeURIComponent(name)}`
+        `http://localhost:5000/api/reddit/${encodeURIComponent(name)}`
       );
-
-      if (!response.ok) {
-        throw new Error(
-          "Unable to fetch this subreddit. Please check the name."
-        );
-      }
 
       const data = await response.json();
 
-      const rawPosts = data.data.children.map(
-        (child) => child.data
-      );
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Unable to fetch this subreddit."
+        );
+      }
+
+      /*
+        Backend converts Reddit RSS/XML
+        into a clean JSON response:
+
+        {
+          posts: [
+            {
+              id,
+              title,
+              url,
+              upvotes
+            }
+          ]
+        }
+          we fetch using rss cause reddit block fetching using json
+      */
+
+      const rawPosts = data.posts || [];
+
+      if (rawPosts.length === 0) {
+        throw new Error(
+          "No posts found for this subreddit."
+        );
+      }
 
       let positive = 0;
       let neutral = 0;
@@ -92,10 +104,10 @@ export default function App() {
         return {
           id: post.id,
           title: post.title,
-          url: `https://reddit.com${post.permalink}`,
+          url: post.url,
           sentimentScore: result.score,
           category,
-          upvotes: post.ups,
+          upvotes: post.upvotes || 0,
         };
       });
 
@@ -106,11 +118,16 @@ export default function App() {
         neutral,
         negative,
         avgScore: (
-          totalScore / (analyzedPosts.length || 1)
+          totalScore / analyzedPosts.length
         ).toFixed(2),
       });
     } catch (err) {
-      setError(err.message);
+      console.error("Vibe Check Error:", err);
+
+      setError(
+        err.message || "Something went wrong."
+      );
+
       setPosts([]);
     } finally {
       setLoading(false);
@@ -118,7 +135,9 @@ export default function App() {
   };
 
   const totalPosts =
-    stats.positive + stats.neutral + stats.negative;
+    stats.positive +
+    stats.neutral +
+    stats.negative;
 
   const getOverallVibe = () => {
     if (!totalPosts) return "—";
@@ -144,7 +163,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#070b14] text-white">
-      {/* Background decoration */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute left-1/2 top-[-200px] h-[500px] w-[700px] -translate-x-1/2 rounded-full bg-blue-600/10 blur-[120px]" />
       </div>
@@ -227,18 +245,21 @@ export default function App() {
           <div className="mt-3 flex flex-wrap justify-center gap-2 text-sm text-slate-500">
             <span>Try:</span>
 
-            {["reactjs", "programming", "webdev", "javascript"].map(
-              (name) => (
-                <button
-                  key={name}
-                  type="button"
-                  onClick={() => setSubreddit(name)}
-                  className="transition hover:text-blue-400"
-                >
-                  r/{name}
-                </button>
-              )
-            )}
+            {[
+              "reactjs",
+              "programming",
+              "webdev",
+              "javascript",
+            ].map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => setSubreddit(name)}
+                className="transition hover:text-blue-400"
+              >
+                {name}
+              </button>
+            ))}
           </div>
         </motion.form>
 
@@ -262,7 +283,6 @@ export default function App() {
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              transition={{ duration: 0.4 }}
             >
               {/* Current subreddit */}
               <div className="mb-5 flex items-center justify-between">
@@ -272,7 +292,7 @@ export default function App() {
                   </p>
 
                   <h2 className="text-2xl font-bold">
-                    r/{subreddit.trim()}
+                    {subreddit.trim()}
                   </h2>
                 </div>
 
@@ -318,8 +338,6 @@ export default function App() {
 
               {/* Overall vibe */}
               <motion.div
-                initial={{ opacity: 0, scale: 0.98 }}
-                animate={{ opacity: 1, scale: 1 }}
                 className="mt-4 rounded-2xl border border-blue-500/20 bg-gradient-to-r from-blue-500/10 to-transparent p-6"
               >
                 <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
@@ -353,7 +371,7 @@ export default function App() {
                   </h2>
 
                   <p className="mt-1 text-sm text-slate-500">
-                    Sentiment analysis of the top 50 hot post
+                    Sentiment analysis of the hottest post
                     titles.
                   </p>
                 </div>
@@ -380,7 +398,10 @@ export default function App() {
             className="mx-auto mt-16 max-w-xl text-center"
           >
             <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-800 bg-[#0d1422]">
-              <BarChart3 className="text-blue-400" size={28} />
+              <BarChart3
+                className="text-blue-400"
+                size={28}
+              />
             </div>
 
             <h2 className="text-xl font-semibold">
@@ -388,7 +409,7 @@ export default function App() {
             </h2>
 
             <p className="mt-2 text-slate-500">
-              Enter a subreddit above to analyze its 50
+              Enter a subreddit above to analyze its
               hottest posts.
             </p>
           </motion.div>
