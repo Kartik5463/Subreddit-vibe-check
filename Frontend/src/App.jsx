@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { VITE_API_URL } from "api.js";
+import { VITE_API_URL } from "./api.js";
 import Sentiment from "sentiment";
 import {
   Smile,
