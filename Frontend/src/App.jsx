@@ -41,7 +41,7 @@ export default function App() {
 
     setLoading(true);
     setError("");
-
+    console.log("API URL:", VITE_API_URL);
     try {
       const response = await fetch(
         `${VITE_API_URL}/api/reddit/${encodeURIComponent(name)}`
