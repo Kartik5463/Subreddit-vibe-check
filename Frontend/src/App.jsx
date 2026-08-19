@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { VITE_API_URL } from "api.js";
 import Sentiment from "sentiment";
 import {
   Smile,
@@ -43,9 +44,10 @@ export default function App() {
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/reddit/${encodeURIComponent(name)}`
+        `${VITE_API_URL}/api/reddit/${encodeURIComponent(name)}`
       );
 
+      
       const data = await response.json();
 
       if (!response.ok) {
