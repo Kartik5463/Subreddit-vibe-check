@@ -21,6 +21,7 @@ export default function App() {
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
 
   const [stats, setStats] = useState({
     positive: 0,
@@ -41,18 +42,22 @@ export default function App() {
 
     setLoading(true);
     setError("");
+    setWarning("");
     try {
       const response = await fetch(
         `${VITE_API_URL}api/reddit/${encodeURIComponent(name)}`
       );
 
-      
       const data = await response.json();
 
       if (!response.ok) {
         throw new Error(
           data.error || "Unable to fetch this subreddit."
         );
+      }
+
+      if (data.warning) {
+        setWarning(data.warning);
       }
 
       /*
@@ -274,6 +279,20 @@ export default function App() {
               className="mx-auto mb-8 max-w-3xl rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-center text-red-300"
             >
               {error}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Warning / Cache Notice */}
+        <AnimatePresence>
+          {warning && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="mx-auto mb-8 max-w-3xl rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-center text-amber-300"
+            >
+              {warning}
             </motion.div>
           )}
         </AnimatePresence>
