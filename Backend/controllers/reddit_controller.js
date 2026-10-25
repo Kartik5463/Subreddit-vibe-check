@@ -2,13 +2,17 @@ import Parser from "rss-parser";
 
 const parser = new Parser();
 
-// In-memory cache for subreddits: key -> { posts, timestamp }
+// In-memory cache for subreddits: key -> { posts, hasUpvotes, timestamp }
 const cache = new Map();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes fresh cache
 const STALE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours stale fallback cache
+const CACHE_MAX_ENTRIES = 500; // hard cap so the map cannot grow without bound
 
 // Deduplicate concurrent in-flight requests for the same subreddit
 const inFlightRequests = new Map();
+
+// Reddit subreddit names are letters, digits and underscores only
+const SUBREDDIT_PATTERN = /^[A-Za-z0-9_]{2,21}$/;
 
 // Cached Reddit OAuth token (if credentials are provided in .env)
 let redditAccessToken = null;
@@ -25,6 +29,32 @@ const USER_AGENTS = [
 function getRandomUserAgent() {
   const index = Math.floor(Math.random() * USER_AGENTS.length);
   return USER_AGENTS[index];
+}
+
+/**
+ * Drops entries past the stale window, then trims the oldest remaining
+ * entries if the cache is still over its size cap.
+ */
+function pruneCache() {
+  const now = Date.now();
+
+  for (const [key, entry] of cache) {
+    if (now - entry.timestamp > STALE_TTL_MS) {
+      cache.delete(key);
+    }
+  }
+
+  if (cache.size <= CACHE_MAX_ENTRIES) return;
+
+  // Map keeps insertion order and every write re-inserts, so the leading
+  // keys are the least recently refreshed.
+  const overflow = cache.size - CACHE_MAX_ENTRIES;
+  let removed = 0;
+  for (const key of cache.keys()) {
+    if (removed >= overflow) break;
+    cache.delete(key);
+    removed++;
+  }
 }
 
 /**
@@ -102,6 +132,12 @@ async function fetchViaOAuth(subreddit, token) {
   console.log("Reddit OAuth response status:", response.status);
 
   if (!response.ok) {
+    // A revoked or stale token should not poison every later request.
+    if (response.status === 401 || response.status === 403) {
+      redditAccessToken = null;
+      tokenExpiresAt = 0;
+    }
+
     return {
       success: false,
       status: response.status,
@@ -126,14 +162,77 @@ async function fetchViaOAuth(subreddit, token) {
     url: child.data.permalink
       ? `https://reddit.com${child.data.permalink}`
       : child.data.url || "",
-    upvotes: child.data.ups || 0,
+    upvotes: child.data.ups ?? null,
   }));
 
   return {
     success: true,
     posts,
     status: 200,
+    hasUpvotes: true,
   };
+}
+
+/**
+ * Reddit sometimes answers 200 with an HTML page instead of a feed. Only a
+ * page that explicitly names the reason tells us anything about the
+ * subreddit: old.reddit.com redirects to a generic "Welcome to Reddit" bot
+ * gate for every name, real or not, so a bare HTML body is evidence that the
+ * endpoint was blocked, not that the subreddit is missing.
+ *
+ * Returns a definitive result, { rateLimited: true }, or null when the page
+ * says nothing useful.
+ */
+export function classifyNonFeedBody(xml, subreddit) {
+  if (/quarantine/i.test(xml)) {
+    return {
+      success: false,
+      status: 403,
+      error: "This subreddit is quarantined and cannot be analyzed.",
+    };
+  }
+
+  // "private" appears in Reddit's own interstitial for restricted communities.
+  if (/\bthis (community|subreddit) is private\b|\bprivate community\b/i.test(xml)) {
+    return {
+      success: false,
+      status: 403,
+      error: "This subreddit is private and cannot be analyzed.",
+    };
+  }
+
+  if (/has been banned|\bbanned\b.{0,40}\bcommunity\b/i.test(xml)) {
+    return {
+      success: false,
+      status: 404,
+      error: `The subreddit "${subreddit}" has been banned.`,
+    };
+  }
+
+  if (/there doesn.t seem to be anything here|page not found|nothing here/i.test(xml)) {
+    return {
+      success: false,
+      status: 404,
+      error: `No subreddit named "${subreddit}" was found.`,
+    };
+  }
+
+  // Reddit's over-limit page is served as HTML with a 200.
+  if (/whoa there, pardner|you.ve been doing that a lot|take a break/i.test(xml)) {
+    return { rateLimited: true };
+  }
+
+  return null;
+}
+
+/** True when the body actually looks like an XML/Atom/RSS document. */
+export function looksLikeFeed(xml) {
+  const head = xml.slice(0, 600).trimStart().toLowerCase();
+  return (
+    head.startsWith("<?xml") ||
+    head.startsWith("<feed") ||
+    head.startsWith("<rss")
+  );
 }
 
 /**
@@ -148,6 +247,7 @@ async function fetchViaRSS(subreddit) {
   let lastStatus = 500;
   let lastError = null;
   let rateLimited = false;
+  let blocked = false;
   let retryAfterSeconds = null;
 
   for (const url of endpoints) {
@@ -168,6 +268,17 @@ async function fetchViaRSS(subreddit) {
       lastStatus = response.status;
       console.log(`Reddit RSS status (${url}):`, response.status);
 
+      // A missing subreddit redirects to /subreddits/search.rss, which is a
+      // valid feed of *other* communities. Without this check those search
+      // results would be analyzed as if they were the subreddit's posts.
+      if (/\/subreddits\/search/i.test(response.url)) {
+        return {
+          success: false,
+          status: 404,
+          error: `No subreddit named "${subreddit}" was found.`,
+        };
+      }
+
       if (response.status === 429) {
         rateLimited = true;
         const resetHeader =
@@ -184,15 +295,25 @@ async function fetchViaRSS(subreddit) {
       const xml = await response.text();
 
       if (response.status === 403) {
-        if (xml.includes(": private</title>")) {
+        if (/private|quarantined/i.test(xml)) {
           return {
             success: false,
             status: 403,
-            error: "This subreddit is private and cannot be analyzed.",
+            error:
+              "This subreddit is private or quarantined and cannot be analyzed.",
           };
         }
         lastError = "Reddit denied access to this subreddit.";
         continue;
+      }
+
+      // A 404 is definitive, so stop instead of retrying the other endpoint.
+      if (response.status === 404) {
+        return {
+          success: false,
+          status: 404,
+          error: `No subreddit named "${subreddit}" was found.`,
+        };
       }
 
       if (!response.ok) {
@@ -200,8 +321,35 @@ async function fetchViaRSS(subreddit) {
         continue;
       }
 
-      // Parse RSS XML
-      const feed = await parser.parseString(xml);
+      // A 200 that is not a feed is an HTML page. Use it only when it names
+      // a reason; otherwise treat this endpoint as blocked and move on.
+      if (!looksLikeFeed(xml)) {
+        const verdict = classifyNonFeedBody(xml, subreddit);
+
+        if (verdict?.rateLimited) {
+          rateLimited = true;
+          continue;
+        }
+
+        if (verdict) return verdict;
+
+        blocked = true;
+        lastError =
+          "Reddit served a web page instead of a feed, which usually means it is blocking automated requests.";
+        continue;
+      }
+
+      // Parse RSS XML. Parser messages ("Invalid character in entity name")
+      // mean nothing to a user, so keep them in the log only.
+      let feed;
+      try {
+        feed = await parser.parseString(xml);
+      } catch (parseError) {
+        console.warn(`Failed to parse feed from ${url}:`, parseError.message);
+        blocked = true;
+        lastError = "Reddit returned a feed that could not be read.";
+        continue;
+      }
 
       if (!feed.items || feed.items.length === 0) {
         return {
@@ -213,31 +361,56 @@ async function fetchViaRSS(subreddit) {
       }
 
       const posts = feed.items.map((item, index) => ({
-        id: item.id || item.guid || String(index),
+        id: item.id || item.guid || `${subreddit}-${index}`,
         title: item.title || "Untitled",
+        // RSS feeds carry no score, so report "unknown" rather than a fake 0.
         url: item.link || "",
-        upvotes: 0,
+        upvotes: null,
       }));
 
       return {
         success: true,
         posts,
         status: 200,
+        hasUpvotes: false,
       };
     } catch (err) {
       console.warn(`Error fetching ${url}:`, err.message);
-      lastError = err.message;
+      lastError =
+        err.name === "TimeoutError" || err.name === "AbortError"
+          ? "Reddit took too long to respond."
+          : "Could not reach Reddit.";
     }
+  }
+
+  if (rateLimited) {
+    return {
+      success: false,
+      status: 429,
+      rateLimited: true,
+      retryAfterSeconds,
+      error:
+        "Reddit is temporarily rate-limiting requests. Please try again in a few moments.",
+    };
+  }
+
+  // Every endpoint was blocked or unparseable. That is an upstream
+  // availability problem, so do not claim the subreddit does not exist.
+  if (blocked) {
+    return {
+      success: false,
+      status: 503,
+      error:
+        "Reddit is currently blocking automated requests for this subreddit. Adding Reddit API credentials to the server makes this reliable.",
+    };
   }
 
   return {
     success: false,
-    status: rateLimited ? 429 : lastStatus,
-    rateLimited,
-    retryAfterSeconds,
-    error: rateLimited
-      ? "Reddit is temporarily rate-limiting requests. Please try again in a few moments."
-      : lastError || "Failed to fetch subreddit from Reddit",
+    // Never report a failure with a 2xx status: lastStatus can still be 200
+    // when the request succeeded but its body was unusable.
+    status: lastStatus >= 400 ? lastStatus : 502,
+    error: lastError || "Failed to fetch subreddit from Reddit",
   };
 }
 
@@ -252,7 +425,16 @@ export const getSubreddit = async (req, res) => {
     }
 
     // Strip optional "r/" prefix and clean whitespace
-    const subreddit = rawSubreddit.trim().replace(/^r\//i, "");
+    const subreddit = rawSubreddit.trim().replace(/^\/?r\//i, "");
+
+    // Reject names Reddit could never resolve before spending an upstream call.
+    if (!SUBREDDIT_PATTERN.test(subreddit)) {
+      return res.status(400).json({
+        error:
+          "Invalid subreddit name. Use 2-21 letters, numbers, or underscores.",
+      });
+    }
+
     const cacheKey = subreddit.toLowerCase();
     const now = Date.now();
 
@@ -261,15 +443,21 @@ export const getSubreddit = async (req, res) => {
     if (cachedEntry && now - cachedEntry.timestamp < CACHE_TTL_MS) {
       console.log(`Cache HIT for subreddit: ${cacheKey}`);
       return res.json({
+        subreddit,
         posts: cachedEntry.posts,
+        hasUpvotes: cachedEntry.hasUpvotes,
         cached: true,
       });
     }
 
     // 2. In-flight request deduplication to prevent hammering Reddit with concurrent duplicate queries
     let fetchPromise = inFlightRequests.get(cacheKey);
+    // Only the request that started the fetch may clear the dedup entry.
+    // Otherwise an early-finishing waiter lets a duplicate fetch start.
+    let isOwner = false;
 
     if (!fetchPromise) {
+      isOwner = true;
       fetchPromise = (async () => {
         // Try OAuth first if credentials are provided in .env
         const token = await getRedditOAuthToken();
@@ -293,18 +481,22 @@ export const getSubreddit = async (req, res) => {
     try {
       result = await fetchPromise;
     } finally {
-      inFlightRequests.delete(cacheKey);
+      if (isOwner) inFlightRequests.delete(cacheKey);
     }
 
     // 3. Fresh fetch succeeded
     if (result.success && result.posts && result.posts.length > 0) {
       cache.set(cacheKey, {
         posts: result.posts,
+        hasUpvotes: Boolean(result.hasUpvotes),
         timestamp: now,
       });
+      pruneCache();
 
       return res.json({
+        subreddit,
         posts: result.posts,
+        hasUpvotes: Boolean(result.hasUpvotes),
       });
     }
 
@@ -319,7 +511,9 @@ export const getSubreddit = async (req, res) => {
         `Serving STALE cache for ${cacheKey} due to Reddit status ${result.status}`
       );
       return res.json({
+        subreddit,
         posts: cachedEntry.posts,
+        hasUpvotes: cachedEntry.hasUpvotes,
         cached: true,
         stale: true,
         warning:
