@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { VITE_API_URL } from "./api.js";
 import Sentiment from "sentiment";
 import {
@@ -16,10 +16,11 @@ import {
   Sparkles,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import VibeLoader from "./VibeLoader.jsx";
+import { TOPICS, QUICK_PICKS } from "./topics.js";
+import { applySeo, pushSubredditUrl, subredditFromPath } from "./seo.js";
 
 const sentiment = new Sentiment();
-
-const SUGGESTIONS = ["reactjs", "programming", "webdev", "javascript", "node"];
 
 const EMPTY_STATS = {
   positive: 0,
@@ -29,7 +30,9 @@ const EMPTY_STATS = {
 };
 
 export default function App() {
-  const [subreddit, setSubreddit] = useState("reactjs");
+  // A /r/<name> deep link seeds the input before the first paint, which also
+  // keeps the mount effect from having to set state synchronously.
+  const [subreddit, setSubreddit] = useState(() => subredditFromPath() || "");
   const [analyzed, setAnalyzed] = useState("");
   const [posts, setPosts] = useState([]);
   const [hasUpvotes, setHasUpvotes] = useState(false);
@@ -43,11 +46,6 @@ export default function App() {
   // the results of a later one.
   const requestRef = useRef(null);
 
-  useEffect(() => {
-    // Cancel any in-flight request when the app unmounts.
-    return () => requestRef.current?.abort();
-  }, []);
-
   // Rate-limit cooldown ticker.
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -55,17 +53,15 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cooldown]);
 
-  const fetchVibeCheck = async (e) => {
-    e.preventDefault();
-
-    const name = subreddit.trim().replace(/^\/?r\//i, "");
+  const runAnalysis = useCallback(async (rawName, { updateUrl = true } = {}) => {
+    const name = String(rawName || "")
+      .trim()
+      .replace(/^\/?r\//i, "");
 
     if (!name) {
       setError("Please enter a subreddit.");
       return;
     }
-
-    if (cooldown > 0) return;
 
     // Replace any request still running so results arrive in order.
     requestRef.current?.abort();
@@ -75,6 +71,8 @@ export default function App() {
     setLoading(true);
     setError("");
     setWarning("");
+
+    if (updateUrl) pushSubredditUrl(name);
 
     try {
       const response = await fetch(
@@ -163,6 +161,7 @@ export default function App() {
 
       setPosts(analyzedPosts);
       setAnalyzed(data.subreddit || name);
+      setSubreddit(data.subreddit || name);
       setHasUpvotes(Boolean(data.hasUpvotes));
       setStats({
         positive,
@@ -186,7 +185,41 @@ export default function App() {
         setLoading(false);
       }
     }
-  };
+  }, []);
+
+  // Deep links: /r/<name> analyzes that subreddit on load, and the browser's
+  // back and forward buttons move between results.
+  useEffect(() => {
+    const fromPath = subredditFromPath();
+    if (fromPath) {
+      // Fetch-on-mount for a deep link: the URL is the external system being
+      // synchronized from, and runAnalysis sets loading state as it starts.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      runAnalysis(fromPath, { updateUrl: false });
+    }
+
+    const onPopState = () => {
+      const name = subredditFromPath();
+      if (name) {
+        setSubreddit(name);
+        runAnalysis(name, { updateUrl: false });
+      } else {
+        requestRef.current?.abort();
+        requestRef.current = null;
+        setLoading(false);
+        setPosts([]);
+        setAnalyzed("");
+        setStats(EMPTY_STATS);
+        setError("");
+      }
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      requestRef.current?.abort();
+    };
+  }, [runAnalysis]);
 
   const totalPosts = stats.positive + stats.neutral + stats.negative;
 
@@ -205,6 +238,31 @@ export default function App() {
   };
 
   const overallVibe = getOverallVibe();
+
+  // Keep the document head in step with what is on screen.
+  useEffect(() => {
+    applySeo(
+      analyzed
+        ? { subreddit: analyzed, vibe: overallVibe, postCount: posts.length }
+        : {}
+    );
+  }, [analyzed, overallVibe, posts.length]);
+
+  const onSubmit = (e) => {
+    e.preventDefault();
+    if (cooldown > 0) return;
+    runAnalysis(subreddit);
+  };
+
+  // Topic and quick-pick entries are real links so they can be crawled and
+  // opened in a new tab, but are handled in-page on a normal click.
+  const pick = (e, name) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    setSubreddit(name);
+    runAnalysis(name);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const vibeTheme = {
     Positive: {
@@ -238,6 +296,7 @@ export default function App() {
   }[overallVibe];
 
   const buttonLabel = cooldown > 0 ? `Retry in ${cooldown}s` : "Analyze vibe";
+  const showLanding = !loading && posts.length === 0;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-canvas text-slate-900">
@@ -253,38 +312,52 @@ export default function App() {
 
       <main className="relative mx-auto max-w-6xl px-5 pb-20 pt-12 md:px-8 md:pt-16">
         {/* Header */}
-        <motion.header
-          initial={{ opacity: 0, y: -16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="mb-10 text-center"
-        >
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-brand-200 bg-white/80 px-4 py-1.5 text-sm font-medium text-brand-700 shadow-sm backdrop-blur">
-            <TrendingUp size={15} />
-            Reddit sentiment analyzer
-          </div>
+        <header className="mb-10 text-center">
+          <motion.div
+            initial={{ opacity: 0, y: -16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+          >
+            <a
+              href="/"
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey) return;
+                e.preventDefault();
+                pushSubredditUrl(null);
+                setPosts([]);
+                setAnalyzed("");
+                setStats(EMPTY_STATS);
+                setError("");
+              }}
+              className="mb-5 inline-flex items-center gap-2 rounded-full border border-brand-200 bg-white/80 px-4 py-1.5 text-sm font-medium text-brand-700 shadow-sm backdrop-blur transition hover:bg-brand-50"
+            >
+              <TrendingUp size={15} />
+              Reddit sentiment analyzer
+            </a>
 
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 md:text-6xl">
-            The{" "}
-            <span className="bg-gradient-to-r from-brand-600 to-brand-500 bg-clip-text text-transparent">
-              Subreddit
-            </span>{" "}
-            Vibe Check
-          </h1>
+            <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 md:text-6xl">
+              The{" "}
+              <span className="bg-gradient-to-r from-brand-600 to-brand-500 bg-clip-text text-transparent">
+                Subreddit
+              </span>{" "}
+              Vibe Check
+            </h1>
 
-          <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-slate-600 md:text-lg">
-            Discover what Reddit is feeling today by analyzing the sentiment of
-            the hottest posts in any subreddit.
-          </p>
-        </motion.header>
+            <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-slate-600 md:text-lg">
+              Analyze the mood of any subreddit — gaming, cooking, sports,
+              science, music, news or anything else Reddit argues about.
+            </p>
+          </motion.div>
+        </header>
 
         {/* Search */}
         <motion.form
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.1 }}
-          onSubmit={fetchVibeCheck}
-          className="mx-auto mb-10 max-w-3xl"
+          onSubmit={onSubmit}
+          className="mx-auto mb-8 max-w-3xl"
+          role="search"
         >
           <div className="card-surface flex flex-col gap-2.5 rounded-2xl p-2.5 sm:flex-row">
             <div className="relative flex-1">
@@ -298,7 +371,7 @@ export default function App() {
                 type="text"
                 value={subreddit}
                 onChange={(e) => setSubreddit(e.target.value)}
-                placeholder="Enter a subreddit, e.g. reactjs"
+                placeholder="Try any subreddit — AskReddit, aww, Cooking…"
                 aria-label="Subreddit name"
                 autoComplete="off"
                 spellCheck="false"
@@ -326,17 +399,17 @@ export default function App() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-sm">
-            <span className="text-slate-500">Try:</span>
+            <span className="text-slate-500">Popular:</span>
 
-            {SUGGESTIONS.map((name) => (
-              <button
+            {QUICK_PICKS.map((name) => (
+              <a
                 key={name}
-                type="button"
-                onClick={() => setSubreddit(name)}
+                href={`/r/${name}`}
+                onClick={(e) => pick(e, name)}
                 className="rounded-full border border-slate-200 bg-white px-3 py-1 font-medium text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50 hover:text-brand-700"
               >
                 r/{name}
-              </button>
+              </a>
             ))}
           </div>
         </motion.form>
@@ -373,16 +446,18 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Loading skeleton */}
-        {loading && posts.length === 0 && <LoadingSkeleton />}
+        {/* Loading */}
+        {loading && (
+          <VibeLoader subreddit={subreddit.trim().replace(/^\/?r\//i, "") || "reddit"} />
+        )}
 
         {/* Dashboard */}
         <AnimatePresence>
-          {posts.length > 0 && (
+          {!loading && posts.length > 0 && (
             <motion.section
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              aria-busy={loading}
+              aria-label={`Sentiment results for r/${analyzed}`}
             >
               {/* Current subreddit */}
               <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -515,7 +590,7 @@ export default function App() {
               <div className="mt-10">
                 <div className="mb-5">
                   <h2 className="text-2xl font-bold text-slate-900">
-                    Hot posts
+                    Hot posts in r/{analyzed}
                   </h2>
 
                   <p className="mt-1 text-sm text-slate-600">
@@ -538,34 +613,125 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Empty state */}
-        {!loading && posts.length === 0 && !error && (
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mx-auto mt-16 max-w-xl text-center"
-          >
-            <div className="card-surface mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl">
-              <BarChart3 className="text-brand-600" size={26} />
-            </div>
+        {/* Landing: browse by topic */}
+        {showLanding && <TopicBrowser onPick={pick} />}
 
-            <h2 className="text-xl font-semibold text-slate-900">
-              Ready to check the vibe?
-            </h2>
+        {/* Static explainer: useful to readers and to crawlers */}
+        <HowItWorks />
 
-            <p className="mx-auto mt-2 max-w-sm text-slate-600">
-              Enter a subreddit above to analyze the sentiment of its hottest
-              posts.
-            </p>
-          </motion.div>
-        )}
-
-        <footer className="mt-20 border-t border-slate-200 pt-6 text-center text-xs text-slate-500">
+        <footer className="mt-16 border-t border-slate-200 pt-6 text-center text-xs text-slate-500">
           Sentiment scored locally with the AFINN-165 word list. Titles only, so
-          treat the result as a rough read rather than a verdict.
+          treat the result as a rough read rather than a verdict. Not affiliated
+          with Reddit.
         </footer>
       </main>
     </div>
+  );
+}
+
+function TopicBrowser({ onPick }) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="mt-6"
+      aria-labelledby="browse-heading"
+    >
+      <div className="mb-6 text-center">
+        <h2
+          id="browse-heading"
+          className="text-2xl font-bold text-slate-900"
+        >
+          Browse by topic
+        </h2>
+        <p className="mx-auto mt-2 max-w-xl text-slate-600">
+          Any public subreddit works. Here are a few hundred posts' worth of
+          starting points across every interest.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {TOPICS.map((topic, i) => (
+          <motion.div
+            key={topic.id}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: Math.min(i * 0.03, 0.4) }}
+            className="card-surface rounded-2xl p-4"
+          >
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <span aria-hidden="true" className="text-lg">
+                {topic.emoji}
+              </span>
+              {topic.label}
+            </h3>
+
+            <ul className="mt-3 space-y-1">
+              {topic.subs.map((name) => (
+                <li key={name}>
+                  <a
+                    href={`/r/${name}`}
+                    onClick={(e) => onPick(e, name)}
+                    className="block truncate rounded-lg px-2 py-1 text-sm text-slate-600 transition hover:bg-brand-50 hover:text-brand-700"
+                  >
+                    r/{name}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        ))}
+      </div>
+    </motion.section>
+  );
+}
+
+function HowItWorks() {
+  const steps = [
+    {
+      title: "Pick any subreddit",
+      body: "Type a name or choose a topic. Every public community works — there is no fixed list and no category restriction.",
+    },
+    {
+      title: "We read the hot posts",
+      body: "The server fetches up to 50 of the subreddit's hottest posts, using Reddit's official API when credentials are configured and public feeds otherwise.",
+    },
+    {
+      title: "Every title gets scored",
+      body: "Each headline is scored against the AFINN-165 sentiment word list, then grouped as positive, neutral or negative.",
+    },
+    {
+      title: "You get the mood",
+      body: "The spread, the average score and an overall verdict show how the community is feeling right now.",
+    },
+  ];
+
+  return (
+    <section
+      className="mt-16 border-t border-slate-200 pt-10"
+      aria-labelledby="how-heading"
+    >
+      <h2
+        id="how-heading"
+        className="text-center text-2xl font-bold text-slate-900"
+      >
+        How the vibe check works
+      </h2>
+
+      <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        {steps.map((step, i) => (
+          <div key={step.title}>
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-50 text-sm font-bold text-brand-700">
+              {i + 1}
+            </div>
+            <h3 className="mt-3 font-semibold text-slate-900">{step.title}</h3>
+            <p className="mt-1.5 text-sm leading-relaxed text-slate-600">
+              {step.body}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -692,33 +858,5 @@ function PostCard({ post, index, showUpvotes }) {
         </div>
       </div>
     </motion.a>
-  );
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="animate-pulse" aria-hidden="true">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="card-surface h-[150px] rounded-2xl p-5">
-            <div className="h-10 w-10 rounded-xl bg-slate-100" />
-            <div className="mt-5 h-3 w-16 rounded bg-slate-100" />
-            <div className="mt-3 h-6 w-12 rounded bg-slate-100" />
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-10 space-y-3">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <div key={i} className="card-surface rounded-2xl p-5">
-            <div className="h-4 w-3/4 rounded bg-slate-100" />
-            <div className="mt-4 flex gap-3">
-              <div className="h-5 w-20 rounded-full bg-slate-100" />
-              <div className="h-5 w-28 rounded-full bg-slate-100" />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
   );
 }

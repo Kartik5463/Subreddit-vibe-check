@@ -5,16 +5,173 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f6f7f9" />
+
+    <title>Subreddit Vibe Check — Reddit sentiment analyzer for any subreddit</title>
     <meta
       name="description"
-      content="Analyze the sentiment of the hottest posts in any subreddit and see the community's current mood at a glance."
+      content="Analyze the sentiment of the hottest posts in any subreddit — from AskReddit and aww to Cooking, movies, sports and science. See any community's current mood at a glance."
     />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <!-- Absolute by necessity: a root-relative href here is treated as a
+         build asset. Overwritten at runtime with the real origin. -->
+    <link rel="canonical" href="https://subreddit-vibe-check.vercel.app/" />
+    <meta
+      property="og:url"
+      content="https://subreddit-vibe-check.vercel.app/"
+    />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Subreddit Vibe Check" />
+    <meta
+      property="og:title"
+      content="Subreddit Vibe Check — Reddit sentiment analyzer"
+    />
+    <meta
+      property="og:description"
+      content="Analyze the mood of any subreddit: gaming, cooking, sports, science, music, news or anything else Reddit argues about."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Subreddit Vibe Check — Reddit sentiment analyzer"
+    />
+    <meta
+      name="twitter:description"
+      content="Analyze the mood of any subreddit in seconds."
+    />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <title>The Subreddit Vibe Check</title>
+
+    <!--
+      Styles for the pre-hydration shell below. Inlined and render-blocking so
+      the shell is laid out on first paint: Tailwind arrives with the bundle,
+      and without this the shell flashes as unstyled text in the corner.
+      React replaces the shell on mount, after which none of this applies.
+    -->
+    <style>
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        margin: 0;
+        background-color: #f6f7f9;
+        color: #0f172a;
+        font-family: "Inter", ui-sans-serif, system-ui, -apple-system,
+          "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .app-shell {
+        display: flex;
+        min-height: 100vh;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        padding: 2.5rem 1.25rem;
+        text-align: center;
+      }
+      .app-shell h1 {
+        margin: 0;
+        font-size: clamp(2rem, 6vw, 3.25rem);
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+      .app-shell h1 span {
+        color: #f04e00;
+      }
+      .app-shell p {
+        margin: 0;
+        max-width: 34rem;
+        color: #475569;
+        line-height: 1.65;
+      }
+      .app-shell ol {
+        margin: 0;
+        max-width: 34rem;
+        padding: 0;
+        list-style: none;
+        font-size: 0.8125rem;
+        color: #94a3b8;
+      }
+      .app-shell ol li {
+        display: inline;
+      }
+      .app-shell ol li::after {
+        content: " · ";
+      }
+      .app-shell ol li:last-child::after {
+        content: "";
+      }
+      .app-shell-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: #c73e00;
+      }
+      .app-shell-spinner {
+        width: 1rem;
+        height: 1rem;
+        border: 2px solid #feccaa;
+        border-top-color: #f04e00;
+        border-radius: 50%;
+        animation: app-shell-spin 0.8s linear infinite;
+      }
+      @keyframes app-shell-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .app-shell-spinner {
+          animation-duration: 2s;
+        }
+      }
+    </style>
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "Subreddit Vibe Check",
+        "applicationCategory": "UtilityApplication",
+        "operatingSystem": "Any",
+        "description": "Analyze the sentiment of the hottest posts in any subreddit and see the community's current mood at a glance.",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Replaced by the app on mount. Present so crawlers and clients
+         without JavaScript still get the page's purpose and headings. -->
+    <div id="root">
+      <main class="app-shell">
+        <h1>The <span>Subreddit</span> Vibe Check</h1>
+        <p>
+          Analyze the mood of any subreddit — gaming, cooking, sports, science,
+          music, news or anything else Reddit argues about. Every public
+          community works; there is no fixed list and no category restriction.
+        </p>
+        <ol>
+          <li>Pick any subreddit</li>
+          <li>We read its 50 hottest posts</li>
+          <li>Every title is scored for sentiment</li>
+          <li>You get the overall vibe</li>
+        </ol>
+        <span class="app-shell-status">
+          <span class="app-shell-spinner"></span>
+          Loading the vibe check…
+        </span>
+      </main>
+    </div>
+    <noscript>
+      <p>
+        The Subreddit Vibe Check needs JavaScript to analyze a subreddit's
+        sentiment. Please enable JavaScript and reload the page.
+      </p>
+    </noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

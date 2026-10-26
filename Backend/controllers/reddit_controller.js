@@ -4,12 +4,82 @@ const parser = new Parser();
 
 // In-memory cache for subreddits: key -> { posts, hasUpvotes, timestamp }
 const cache = new Map();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes fresh cache
+// 10 minutes fresh cache. Configurable so the stale-serving path is testable.
+const CACHE_TTL_MS =
+  process.env.CACHE_TTL_MS !== undefined
+    ? Number(process.env.CACHE_TTL_MS)
+    : 10 * 60 * 1000;
 const STALE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours stale fallback cache
 const CACHE_MAX_ENTRIES = 500; // hard cap so the map cannot grow without bound
 
 // Deduplicate concurrent in-flight requests for the same subreddit
 const inFlightRequests = new Map();
+
+// Anonymous RSS access is rate-limited aggressively: firing requests back to
+// back gets the whole server throttled, which looks to users like only some
+// subreddits "work". Serialize outbound calls and keep a minimum gap between
+// them. OAuth allows 100/min, so the gap only needs to be large without it.
+const MIN_UPSTREAM_GAP_MS = Number(process.env.REDDIT_MIN_GAP_MS) || 1500;
+const RATE_LIMIT_RETRIES = 1;
+
+let upstreamChain = Promise.resolve();
+let lastUpstreamAt = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Circuit breaker for Reddit's IP-wide rate limit.
+ *
+ * When Reddit says "wait 55 seconds" it means the whole server, not one
+ * subreddit. Continuing to call during that window burns more of the budget
+ * and makes every queued request wait behind doomed calls, so the breaker
+ * short-circuits: cached posts if we have them, an honest wait time if not.
+ */
+let rateLimitedUntil = 0;
+const MAX_BREAKER_MS = 120 * 1000;
+
+function noteRateLimit(retryAfterSeconds) {
+  const waitMs = Math.min(
+    (Number(retryAfterSeconds) || 30) * 1000,
+    MAX_BREAKER_MS
+  );
+  const until = Date.now() + waitMs;
+  if (until > rateLimitedUntil) {
+    rateLimitedUntil = until;
+    console.warn(
+      `Reddit rate limit tripped; pausing upstream calls for ${Math.round(
+        waitMs / 1000
+      )}s`
+    );
+  }
+}
+
+/** Seconds left on the breaker, or 0 when upstream calls are allowed. */
+function breakerSecondsLeft() {
+  const left = rateLimitedUntil - Date.now();
+  return left > 0 ? Math.ceil(left / 1000) : 0;
+}
+
+/**
+ * Runs `task` on a single queue, leaving at least MIN_UPSTREAM_GAP_MS between
+ * consecutive outbound Reddit calls.
+ */
+function scheduleUpstream(task) {
+  const scheduled = upstreamChain.then(async () => {
+    const waitFor = lastUpstreamAt + MIN_UPSTREAM_GAP_MS - Date.now();
+    if (waitFor > 0) await sleep(waitFor);
+    lastUpstreamAt = Date.now();
+    return task();
+  });
+
+  // Keep the chain alive even when a task rejects.
+  upstreamChain = scheduled.then(
+    () => undefined,
+    () => undefined
+  );
+
+  return scheduled;
+}
 
 // Reddit subreddit names are letters, digits and underscores only
 const SUBREDDIT_PATTERN = /^[A-Za-z0-9_]{2,21}$/;
@@ -236,9 +306,38 @@ export function looksLikeFeed(xml) {
 }
 
 /**
- * Fetch posts using RSS feeds across multiple endpoints (www.reddit.com and old.reddit.com)
+ * Fetch posts via RSS, retrying briefly when Reddit reports a rate limit.
+ * A short wait usually clears it, which keeps a cold subreddit from failing
+ * just because another request went out moments earlier.
  */
 async function fetchViaRSS(subreddit) {
+  let result = await attemptRSS(subreddit);
+
+  for (let attempt = 0; attempt < RATE_LIMIT_RETRIES; attempt++) {
+    if (!result.rateLimited) break;
+
+    // Only a very short hint is worth waiting out inside the request. Reddit
+    // typically asks for ~55s, and retrying into that window spends more of
+    // the budget while holding the user's connection open for nothing.
+    const hinted = Number(result.retryAfterSeconds) || 0;
+    if (hinted > 3) break;
+
+    console.log(`Rate limited on ${subreddit}; one short retry`);
+    await sleep(1500);
+    result = await attemptRSS(subreddit);
+  }
+
+  if (result.rateLimited) {
+    noteRateLimit(result.retryAfterSeconds);
+  }
+
+  return result;
+}
+
+/**
+ * One pass over the RSS endpoints (www.reddit.com then old.reddit.com)
+ */
+async function attemptRSS(subreddit) {
   const endpoints = [
     `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/hot.rss?limit=50`,
     `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/hot.rss?limit=50`,
@@ -255,15 +354,18 @@ async function fetchViaRSS(subreddit) {
       console.log(`Attempting RSS fetch from: ${url}`);
       const userAgent = getRandomUserAgent();
 
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": userAgent,
-          Accept: "application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Cache-Control": "no-cache",
-        },
-        signal: AbortSignal.timeout(10000),
-      });
+      const response = await scheduleUpstream(() =>
+        fetch(url, {
+          headers: {
+            "User-Agent": userAgent,
+            Accept:
+              "application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+          },
+          signal: AbortSignal.timeout(10000),
+        })
+      );
 
       lastStatus = response.status;
       console.log(`Reddit RSS status (${url}):`, response.status);
@@ -450,7 +552,39 @@ export const getSubreddit = async (req, res) => {
       });
     }
 
-    // 2. In-flight request deduplication to prevent hammering Reddit with concurrent duplicate queries
+    // 2. Rate limit breaker: while Reddit is throttling this server there is
+    // nothing to gain from calling it again, so answer from cache or say how
+    // long to wait. OAuth has its own generous budget and is left alone.
+    const usingOAuth = Boolean(
+      process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET
+    );
+    const breakerWait = usingOAuth ? 0 : breakerSecondsLeft();
+
+    if (breakerWait > 0 && !inFlightRequests.has(cacheKey)) {
+      if (
+        cachedEntry &&
+        cachedEntry.posts?.length > 0 &&
+        now - cachedEntry.timestamp < STALE_TTL_MS
+      ) {
+        console.log(`Breaker open; serving cached posts for ${cacheKey}`);
+        return res.json({
+          subreddit,
+          posts: cachedEntry.posts,
+          hasUpvotes: cachedEntry.hasUpvotes,
+          cached: true,
+          stale: true,
+          warning:
+            "Reddit is rate-limiting this server right now, so these are recently cached posts.",
+        });
+      }
+
+      return res.status(429).json({
+        error: `Reddit is rate-limiting this server. Please try again in about ${breakerWait} seconds.`,
+        retryAfter: breakerWait,
+      });
+    }
+
+    // 3. In-flight request deduplication to prevent hammering Reddit with concurrent duplicate queries
     let fetchPromise = inFlightRequests.get(cacheKey);
     // Only the request that started the fetch may clear the dedup entry.
     // Otherwise an early-finishing waiter lets a duplicate fetch start.
@@ -484,7 +618,7 @@ export const getSubreddit = async (req, res) => {
       if (isOwner) inFlightRequests.delete(cacheKey);
     }
 
-    // 3. Fresh fetch succeeded
+    // 4. Fresh fetch succeeded
     if (result.success && result.posts && result.posts.length > 0) {
       cache.set(cacheKey, {
         posts: result.posts,
@@ -500,7 +634,7 @@ export const getSubreddit = async (req, res) => {
       });
     }
 
-    // 4. Rate-limited or Reddit error: fall back to stale cache if available
+    // 5. Rate-limited or Reddit error: fall back to stale cache if available
     if (
       cachedEntry &&
       cachedEntry.posts &&
@@ -521,7 +655,7 @@ export const getSubreddit = async (req, res) => {
       });
     }
 
-    // 5. Rate limit hit without cached fallback
+    // 6. Rate limit hit without cached fallback
     if (result.rateLimited || result.status === 429) {
       const waitMessage = result.retryAfterSeconds
         ? ` Please try again in about ${result.retryAfterSeconds} seconds.`
@@ -533,7 +667,7 @@ export const getSubreddit = async (req, res) => {
       });
     }
 
-    // 6. Other errors (e.g. 403 private, 404 not found)
+    // 7. Other errors (e.g. 403 private, 404 not found)
     return res.status(result.status || 500).json({
       error: result.error || "Failed to fetch subreddit from Reddit.",
     });
