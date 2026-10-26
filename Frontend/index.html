@@ -3,51 +3,53 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="mask-icon" href="/favicon-mask.svg" color="#f04e00" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.svg" />
+    <link rel="manifest" href="/site.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f6f7f9" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="author" content="Subreddit Vibe Check" />
 
-    <title>Subreddit Vibe Check — Reddit sentiment analyzer for any subreddit</title>
+    <!-- SEO:START (replaced per route by scripts/prerender.mjs) -->
+    <title>
+      Semantic Subreddit Analyzer — Reddit Sentiment &amp; Mood Checker
+    </title>
     <meta
       name="description"
-      content="Analyze the sentiment of the hottest posts in any subreddit — from AskReddit and aww to Cooking, movies, sports and science. See any community's current mood at a glance."
+      content="Free semantic subreddit analyzer. Measure the sentiment and mood of any subreddit's hottest posts in seconds — r/AskReddit, r/aww, r/Cooking, gaming, sports, science and every other public community."
     />
-    <meta name="robots" content="index, follow, max-image-preview:large" />
-    <!-- Absolute by necessity: a root-relative href here is treated as a
-         build asset. Overwritten at runtime with the real origin. -->
     <link rel="canonical" href="https://subreddit-vibe-check.vercel.app/" />
-    <meta
-      property="og:url"
-      content="https://subreddit-vibe-check.vercel.app/"
-    />
-
+    <meta property="og:url" content="https://subreddit-vibe-check.vercel.app/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Subreddit Vibe Check" />
     <meta
       property="og:title"
-      content="Subreddit Vibe Check — Reddit sentiment analyzer"
+      content="Semantic Subreddit Analyzer — Reddit Sentiment &amp; Mood Checker"
     />
     <meta
       property="og:description"
-      content="Analyze the mood of any subreddit: gaming, cooking, sports, science, music, news or anything else Reddit argues about."
+      content="Measure the sentiment and mood of any subreddit's hottest posts in seconds."
     />
-    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:card" content="summary" />
     <meta
       name="twitter:title"
-      content="Subreddit Vibe Check — Reddit sentiment analyzer"
+      content="Semantic Subreddit Analyzer — Reddit Sentiment &amp; Mood Checker"
     />
     <meta
       name="twitter:description"
-      content="Analyze the mood of any subreddit in seconds."
+      content="Measure the sentiment and mood of any subreddit's hottest posts in seconds."
     />
+    <!-- SEO:END -->
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 
     <!--
-      Styles for the pre-hydration shell below. Inlined and render-blocking so
-      the shell is laid out on first paint: Tailwind arrives with the bundle,
-      and without this the shell flashes as unstyled text in the corner.
-      React replaces the shell on mount, after which none of this applies.
+      Styles for the static page below. Inlined and render-blocking so it is
+      laid out on first paint: Tailwind arrives with the bundle, and without
+      this the content would flash as unstyled text in the corner. React
+      replaces it on mount, after which none of this applies.
     -->
     <style>
       html {
@@ -61,115 +63,263 @@
           "Segoe UI", sans-serif;
         -webkit-font-smoothing: antialiased;
       }
-      .app-shell {
-        display: flex;
-        min-height: 100vh;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 1rem;
-        padding: 2.5rem 1.25rem;
+      .shell {
+        margin: 0 auto;
+        max-width: 60rem;
+        padding: 3.5rem 1.25rem 4rem;
+      }
+      .shell-hero {
         text-align: center;
       }
-      .app-shell h1 {
+      .shell-badge {
+        display: inline-block;
+        margin-bottom: 1.25rem;
+        padding: 0.35rem 0.9rem;
+        border: 1px solid #feccaa;
+        border-radius: 999px;
+        background: #fff;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: #c73e00;
+      }
+      .shell h1 {
         margin: 0;
-        font-size: clamp(2rem, 6vw, 3.25rem);
+        font-size: clamp(2rem, 6vw, 3.5rem);
         font-weight: 800;
         letter-spacing: -0.02em;
+        line-height: 1.1;
       }
-      .app-shell h1 span {
+      .shell h1 span {
         color: #f04e00;
       }
-      .app-shell p {
-        margin: 0;
-        max-width: 34rem;
+      .shell-lede {
+        margin: 1rem auto 0;
+        max-width: 38rem;
         color: #475569;
+        font-size: 1.0625rem;
         line-height: 1.65;
       }
-      .app-shell ol {
-        margin: 0;
-        max-width: 34rem;
-        padding: 0;
-        list-style: none;
-        font-size: 0.8125rem;
-        color: #94a3b8;
-      }
-      .app-shell ol li {
-        display: inline;
-      }
-      .app-shell ol li::after {
-        content: " · ";
-      }
-      .app-shell ol li:last-child::after {
-        content: "";
-      }
-      .app-shell-status {
+      .shell-status {
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
+        margin-top: 1.75rem;
         font-size: 0.875rem;
         font-weight: 500;
         color: #c73e00;
       }
-      .app-shell-spinner {
+      .shell-spinner {
         width: 1rem;
         height: 1rem;
         border: 2px solid #feccaa;
         border-top-color: #f04e00;
         border-radius: 50%;
-        animation: app-shell-spin 0.8s linear infinite;
+        animation: shell-spin 0.8s linear infinite;
       }
-      @keyframes app-shell-spin {
+      @keyframes shell-spin {
         to {
           transform: rotate(360deg);
         }
       }
       @media (prefers-reduced-motion: reduce) {
-        .app-shell-spinner {
+        .shell-spinner {
           animation-duration: 2s;
         }
       }
+      .shell section {
+        margin-top: 3rem;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 2rem;
+      }
+      .shell h2 {
+        margin: 0 0 1.25rem;
+        font-size: 1.375rem;
+        font-weight: 700;
+      }
+      .shell h3 {
+        margin: 0 0 0.375rem;
+        font-size: 0.9375rem;
+        font-weight: 600;
+      }
+      .shell-steps {
+        display: grid;
+        gap: 1.25rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+      }
+      .shell-steps p,
+      .shell-faq p {
+        margin: 0;
+        color: #475569;
+        font-size: 0.875rem;
+        line-height: 1.6;
+      }
+      .shell-faq > div + div {
+        margin-top: 1.25rem;
+      }
+      .shell-links {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+      .shell-links a {
+        display: inline-block;
+        padding: 0.25rem 0.7rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 999px;
+        background: #fff;
+        color: #475569;
+        font-size: 0.8125rem;
+        text-decoration: none;
+      }
+      .shell-foot {
+        margin-top: 3rem;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 1.5rem;
+        color: #94a3b8;
+        font-size: 0.75rem;
+        line-height: 1.6;
+      }
     </style>
 
+    <!-- JSONLD:START (replaced per route by scripts/prerender.mjs) -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@type": "WebApplication",
         "name": "Subreddit Vibe Check",
+        "alternateName": "Semantic Subreddit Analyzer",
         "applicationCategory": "UtilityApplication",
         "operatingSystem": "Any",
-        "description": "Analyze the sentiment of the hottest posts in any subreddit and see the community's current mood at a glance.",
+        "description": "Measure the sentiment and mood of any subreddit's hottest posts.",
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
       }
     </script>
+    <!-- JSONLD:END -->
   </head>
   <body>
-    <!-- Replaced by the app on mount. Present so crawlers and clients
-         without JavaScript still get the page's purpose and headings. -->
     <div id="root">
-      <main class="app-shell">
-        <h1>The <span>Subreddit</span> Vibe Check</h1>
-        <p>
-          Analyze the mood of any subreddit — gaming, cooking, sports, science,
-          music, news or anything else Reddit argues about. Every public
-          community works; there is no fixed list and no category restriction.
+      <!-- SHELL:START (replaced per route by scripts/prerender.mjs) -->
+      <main class="shell">
+        <div class="shell-hero">
+          <span class="shell-badge">Reddit sentiment analyzer</span>
+          <h1>The <span>Subreddit</span> Vibe Check</h1>
+          <p class="shell-lede">
+            A semantic subreddit analyzer that measures the mood of any Reddit
+            community. Enter a subreddit and every one of its hottest post
+            titles is scored for sentiment — gaming, cooking, sports, science,
+            music, news or anything else Reddit argues about.
+          </p>
+          <span class="shell-status">
+            <span class="shell-spinner"></span>
+            Loading the analyzer…
+          </span>
+        </div>
+
+        <section>
+          <h2>How the subreddit analyzer works</h2>
+          <ol class="shell-steps">
+            <li>
+              <h3>1. Pick any subreddit</h3>
+              <p>
+                Type a name or browse by topic. Every public community works —
+                there is no fixed list and no category restriction.
+              </p>
+            </li>
+            <li>
+              <h3>2. We read the hot posts</h3>
+              <p>
+                Up to 50 of the subreddit's hottest posts are fetched from
+                Reddit's official API or its public feeds.
+              </p>
+            </li>
+            <li>
+              <h3>3. Every title is scored</h3>
+              <p>
+                Each headline is scored against the AFINN-165 sentiment
+                lexicon, then grouped as positive, neutral or negative.
+              </p>
+            </li>
+            <li>
+              <h3>4. You get the mood</h3>
+              <p>
+                The spread, the average score and an overall verdict show how
+                the community is feeling right now.
+              </p>
+            </li>
+          </ol>
+        </section>
+
+        <section class="shell-faq">
+          <h2>Frequently asked questions</h2>
+          <div>
+            <h3>What is a subreddit vibe check?</h3>
+            <p>
+              It is a quick read of a subreddit's mood. Instead of scrolling a
+              community to guess how it feels, the analyzer scores the
+              sentiment of its hottest post titles and summarises them as
+              positive, neutral or negative.
+            </p>
+          </div>
+          <div>
+            <h3>Is this really semantic analysis?</h3>
+            <p>
+              It is lexicon-based sentiment analysis, which is a shallow form
+              of semantic analysis: each word carries a known emotional
+              polarity from the AFINN-165 list and the scores are summed per
+              title. It does not parse grammar, resolve context or reliably
+              detect sarcasm, so treat the result as a rough read rather than
+              a verdict.
+            </p>
+          </div>
+          <div>
+            <h3>Which subreddits can I analyze?</h3>
+            <p>
+              Any public subreddit. Private, banned and quarantined
+              communities cannot be read, and the analyzer will say so rather
+              than guess.
+            </p>
+          </div>
+          <div>
+            <h3>Is it free?</h3>
+            <p>
+              Yes. There is no account, no sign-up and no payment, and
+              sentiment scoring runs in your own browser.
+            </p>
+          </div>
+        </section>
+
+        <section>
+          <h2>Popular subreddits to analyze</h2>
+          <ul class="shell-links">
+            <li><a href="/r/AskReddit">r/AskReddit</a></li>
+            <li><a href="/r/aww">r/aww</a></li>
+            <li><a href="/r/Cooking">r/Cooking</a></li>
+            <li><a href="/r/movies">r/movies</a></li>
+            <li><a href="/r/nba">r/nba</a></li>
+            <li><a href="/r/space">r/space</a></li>
+            <li><a href="/r/MadeMeSmile">r/MadeMeSmile</a></li>
+            <li><a href="/r/gaming">r/gaming</a></li>
+          </ul>
+        </section>
+
+        <p class="shell-foot">
+          Sentiment scored locally with the AFINN-165 word list. Titles only,
+          so treat the result as a rough read rather than a verdict. Not
+          affiliated with Reddit.
         </p>
-        <ol>
-          <li>Pick any subreddit</li>
-          <li>We read its 50 hottest posts</li>
-          <li>Every title is scored for sentiment</li>
-          <li>You get the overall vibe</li>
-        </ol>
-        <span class="app-shell-status">
-          <span class="app-shell-spinner"></span>
-          Loading the vibe check…
-        </span>
       </main>
+      <!-- SHELL:END -->
     </div>
     <noscript>
-      <p>
-        The Subreddit Vibe Check needs JavaScript to analyze a subreddit's
-        sentiment. Please enable JavaScript and reload the page.
+      <p style="text-align: center; padding: 1rem; color: #475569">
+        Interactive analysis needs JavaScript. Enable it to check a
+        subreddit's vibe.
       </p>
     </noscript>
     <script type="module" src="/src/main.jsx"></script>

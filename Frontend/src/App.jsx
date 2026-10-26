@@ -18,7 +18,7 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import VibeLoader from "./VibeLoader.jsx";
 import { TOPICS, QUICK_PICKS } from "./topics.js";
-import { applySeo, pushSubredditUrl, subredditFromPath } from "./seo.js";
+import { applySeo, pushSubredditUrl, subredditFromPath, FAQ } from "./seo.js";
 
 const sentiment = new Sentiment();
 
@@ -619,6 +619,9 @@ export default function App() {
         {/* Static explainer: useful to readers and to crawlers */}
         <HowItWorks />
 
+        {/* Mirrors the FAQPage structured data and the prerendered shell */}
+        <FaqSection />
+
         <footer className="mt-16 border-t border-slate-200 pt-6 text-center text-xs text-slate-500">
           Sentiment scored locally with the AFINN-165 word list. Titles only, so
           treat the result as a rough read rather than a verdict. Not affiliated
@@ -728,6 +731,31 @@ function HowItWorks() {
             <p className="mt-1.5 text-sm leading-relaxed text-slate-600">
               {step.body}
             </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function FaqSection() {
+  return (
+    <section
+      className="mt-16 border-t border-slate-200 pt-10"
+      aria-labelledby="faq-heading"
+    >
+      <h2
+        id="faq-heading"
+        className="text-center text-2xl font-bold text-slate-900"
+      >
+        Frequently asked questions
+      </h2>
+
+      <div className="mx-auto mt-8 grid max-w-4xl grid-cols-1 gap-5 sm:grid-cols-2">
+        {FAQ.map(({ q, a }) => (
+          <div key={q} className="card-surface rounded-2xl p-5">
+            <h3 className="font-semibold text-slate-900">{q}</h3>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600">{a}</p>
           </div>
         ))}
       </div>

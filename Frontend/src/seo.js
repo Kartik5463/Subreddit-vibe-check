@@ -9,6 +9,30 @@
 export const SITE_NAME = "Subreddit Vibe Check";
 
 /**
+ * One source of truth for the FAQ: rendered on the page, marked up as
+ * FAQPage structured data, and duplicated in the prerendered static shell.
+ * Keep `scripts/prerender.mjs` in step when editing these.
+ */
+export const FAQ = [
+  {
+    q: "What is a subreddit vibe check?",
+    a: "It is a quick read of a subreddit's mood. Instead of scrolling a community to guess how it feels, the analyzer scores the sentiment of its hottest post titles and summarises them as positive, neutral or negative.",
+  },
+  {
+    q: "Is this really semantic analysis?",
+    a: "It is lexicon-based sentiment analysis, which is a shallow form of semantic analysis: each word carries a known emotional polarity from the AFINN-165 list and the scores are summed per title. It does not parse grammar, resolve context or reliably detect sarcasm.",
+  },
+  {
+    q: "Which subreddits can I analyze?",
+    a: "Any public subreddit. Private, banned and quarantined communities cannot be read, and the analyzer will say so rather than guess.",
+  },
+  {
+    q: "Is it free?",
+    a: "Yes. There is no account, no sign-up and no payment, and sentiment scoring runs in your own browser.",
+  },
+];
+
+/**
  * Public origin used for canonical URLs and structured data. Set
  * VITE_SITE_URL in production; falls back to the current origin.
  */
@@ -63,17 +87,19 @@ function setStructuredData(data) {
 export function applySeo({ subreddit, vibe, postCount } = {}) {
   const origin = siteOrigin();
 
+  // These mirror scripts/prerender.mjs so a client-side navigation produces
+  // the same title and description a crawler was served for that URL.
   const title = subreddit
-    ? `r/${subreddit} vibe check${vibe && vibe !== "—" ? ` — ${vibe}` : ""} | ${SITE_NAME}`
-    : `${SITE_NAME} — Reddit sentiment analyzer for any subreddit`;
+    ? `r/${subreddit} sentiment analysis — ${SITE_NAME}`
+    : "Semantic Subreddit Analyzer — Reddit Sentiment & Mood Checker";
 
   const description = subreddit
-    ? `Sentiment analysis of the hottest posts in r/${subreddit}.${
-        vibe && vibe !== "—"
-          ? ` The current mood reads ${vibe.toLowerCase()}`
-          : ""
-      }${postCount ? ` across ${postCount} posts` : ""}. Check the vibe of any subreddit instantly.`
-    : "Analyze the sentiment of the hottest posts in any subreddit — from AskReddit and aww to Cooking, movies, sports and science. See any community's current mood at a glance.";
+    ? `Is r/${subreddit} positive or negative right now? Semantic sentiment analysis of the hottest posts in r/${subreddit}${
+        postCount ? `, across ${postCount} posts` : ""
+      }${
+        vibe && vibe !== "—" ? `, currently reading ${vibe.toLowerCase()}` : ""
+      }.`
+    : "Free semantic subreddit analyzer. Measure the sentiment and mood of any subreddit's hottest posts in seconds — r/AskReddit, r/aww, r/Cooking, gaming, sports, science and every other public community.";
 
   const canonical = subreddit ? `${origin}/r/${subreddit}` : `${origin}/`;
 
@@ -97,6 +123,7 @@ export function applySeo({ subreddit, vibe, postCount } = {}) {
       "@type": "WebApplication",
       "@id": `${origin}/#app`,
       name: SITE_NAME,
+      alternateName: "Semantic Subreddit Analyzer",
       url: `${origin}/`,
       applicationCategory: "UtilityApplication",
       operatingSystem: "Any",
@@ -104,6 +131,17 @@ export function applySeo({ subreddit, vibe, postCount } = {}) {
       offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
     },
   ];
+
+  if (!subreddit) {
+    graph.push({
+      "@type": "FAQPage",
+      mainEntity: FAQ.map(({ q, a }) => ({
+        "@type": "Question",
+        name: q,
+        acceptedAnswer: { "@type": "Answer", text: a },
+      })),
+    });
+  }
 
   if (subreddit) {
     graph.push({

@@ -1,0 +1,14 @@
+{
+  "name": "Subreddit Vibe Check",
+  "short_name": "Vibe Check",
+  "description": "Semantic subreddit analyzer: measure the mood of any Reddit community in seconds.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#f04e00",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/apple-touch-icon.svg", "sizes": "180x180", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
