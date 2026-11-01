@@ -45,7 +45,7 @@ npm run dev              # http://localhost:5173
 | `REDDIT_CLIENT_ID` | no | Reddit app client ID. Enables the OAuth path. |
 | `REDDIT_CLIENT_SECRET` | no | Reddit app client secret. |
 | `REDDIT_USER_AGENT` | no | User agent sent to Reddit. |
-| `REDDIT_MIN_GAP_MS` | no | Minimum gap between outbound Reddit calls (default `1500`). |
+| `REDDIT_MIN_GAP_MS` | no | Gap between queued outbound Reddit calls (default `250`). |
 
 **Set the Reddit credentials.** Any public subreddit works either way, but the
 anonymous RSS fallback is rate-limited per IP hard enough that consecutive
@@ -146,28 +146,38 @@ history and crawl timing. Remaining work that would help:
 ## How posts are fetched
 
 1. Serve from the in-memory cache if the entry is under 10 minutes old.
-2. If the rate-limit breaker is open, answer from cache or return the
-   remaining wait, without calling Reddit at all.
+2. If Reddit has already said its budget is spent, answer from cache or with
+   the exact wait, without calling Reddit at all.
 3. Join an identical in-flight request rather than issuing a duplicate.
 4. Try the official OAuth API when credentials are present.
-5. Fall back to `www.reddit.com` and then `old.reddit.com` RSS feeds.
+5. Fall back to `www.reddit.com` RSS (and `old.reddit.com` for failures other
+   than a rate limit).
 6. If Reddit still fails, serve a stale cached copy (up to 24 hours) with a
    `warning`.
 
-Outbound calls are queued and spaced by `REDDIT_MIN_GAP_MS` so a burst of
-users cannot trip the limit all at once.
+### Rate limiting
 
-### The rate-limit breaker
+Measured, not guessed: without API keys Reddit gives this server **one
+lookup per ~60-second window**. A successful response already says so —
+`x-ratelimit-remaining: 0.0`, `x-ratelimit-reset: 57` — so the next lookup,
+even one second later, is guaranteed to 429. The window is fixed on Reddit's
+clock, so the actual wait is anywhere from 0 to 60 seconds.
 
-Reddit's anonymous limit applies to the server's IP, not to one subreddit, and
-it asks for roughly a minute. Retrying inside that window spends more of the
-budget and makes every queued request wait behind calls that cannot succeed —
-measured at 44s wall time for six concurrent lookups.
+The server reads `x-ratelimit-remaining` and `x-ratelimit-reset` on every
+Reddit response, successful ones included, and knows when the next slot opens
+before anything fails. Until then lookups never reach Reddit: cached
+subreddits are served instantly, and others get a `429` with the exact
+`retryAfter` plus `reason: "reddit_rate_limit"`.
 
-So when Reddit returns a rate limit, the breaker records the deadline and all
-requests short-circuit until it passes: cached posts where available, an
-honest wait time otherwise. The breaker is skipped entirely when OAuth
-credentials are configured, since that budget is far larger.
+The client treats that as a wait, not an error: it shows a live countdown for
+the queued subreddit and runs the lookup by itself when the slot opens, giving
+up after four consecutive misses (other visitors taking the slot) and offering
+a button instead.
+
+That makes the limit tolerable; it does not remove it. Every visitor shares
+the server's one-lookup-a-minute anonymous budget.
+**Setting `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` is the actual fix**:
+OAuth has its own budget of about 100 requests a minute, tracked separately.
 
 ## Notes
 

@@ -17,10 +17,14 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import VibeLoader from "./VibeLoader.jsx";
+import RateLimitWait from "./RateLimitWait.jsx";
 import { TOPICS, QUICK_PICKS } from "./topics.js";
 import { applySeo, pushSubredditUrl, subredditFromPath, FAQ } from "./seo.js";
 
 const sentiment = new Sentiment();
+
+// How many times a queued lookup re-runs itself before asking for a click.
+const MAX_AUTO_ATTEMPTS = 4;
 
 const EMPTY_STATS = {
   positive: 0,
@@ -39,21 +43,22 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
-  const [cooldown, setCooldown] = useState(0);
   const [stats, setStats] = useState(EMPTY_STATS);
+
+  // A lookup waiting for Reddit's next rate-limit slot:
+  // { name, until, total, attempt, limitedBy }. Rendered as a live countdown
+  // that runs the lookup by itself when the slot opens.
+  const [queued, setQueued] = useState(null);
+  const [now, setNow] = useState(() => Date.now());
 
   // Tracks the newest request so a slow earlier response cannot overwrite
   // the results of a later one.
   const requestRef = useRef(null);
 
-  // Rate-limit cooldown ticker.
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const timer = setTimeout(() => setCooldown((seconds) => seconds - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [cooldown]);
-
-  const runAnalysis = useCallback(async (rawName, { updateUrl = true } = {}) => {
+  const runAnalysis = useCallback(async (
+    rawName,
+    { updateUrl = true, attempt = 1 } = {}
+  ) => {
     const name = String(rawName || "")
       .trim()
       .replace(/^\/?r\//i, "");
@@ -108,10 +113,27 @@ export default function App() {
         );
       }
 
+      // A rate limit is a wait, not a failure: the server says exactly when
+      // Reddit's next slot opens, so queue the lookup and count down to it.
+      if (response.status === 429) {
+        if (requestRef.current !== controller) return;
+        const seconds = Math.min(Math.max(Number(data.retryAfter) || 60, 1), 600);
+        const startedAt = Date.now();
+        setPosts([]);
+        setAnalyzed("");
+        setStats(EMPTY_STATS);
+        setNow(startedAt);
+        setQueued({
+          name,
+          until: startedAt + seconds * 1000,
+          total: seconds,
+          attempt,
+          limitedBy: data.limitedBy || "anonymous",
+        });
+        return;
+      }
+
       if (!response.ok) {
-        if (response.status === 429 && data.retryAfter) {
-          setCooldown(Math.min(Number(data.retryAfter) || 15, 120));
-        }
         throw new Error(data.error || "Unable to fetch this subreddit.");
       }
 
@@ -157,6 +179,7 @@ export default function App() {
       // Ignore a response that was superseded while it was in flight.
       if (requestRef.current !== controller) return;
 
+      setQueued(null);
       if (data.warning) setWarning(data.warning);
 
       setPosts(analyzedPosts);
@@ -175,6 +198,7 @@ export default function App() {
 
       console.error("Vibe Check Error:", err);
 
+      setQueued(null);
       setError(err.message || "Something went wrong.");
       setPosts([]);
       setAnalyzed("");
@@ -211,6 +235,7 @@ export default function App() {
         setAnalyzed("");
         setStats(EMPTY_STATS);
         setError("");
+        setQueued(null);
       }
     };
 
@@ -220,6 +245,31 @@ export default function App() {
       requestRef.current?.abort();
     };
   }, [runAnalysis]);
+
+  // Rate-limit countdown. Ticks while a lookup is queued and runs it the
+  // moment Reddit's slot opens, so nobody has to watch a timer and click
+  // again. Both happen in the interval callback, not the effect body.
+  useEffect(() => {
+    if (!queued) return;
+
+    const timer = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t < queued.until) return;
+      clearInterval(timer);
+
+      // After a few back-to-back misses (other visitors taking the slot),
+      // stop retrying on its own and offer a button instead.
+      if (queued.attempt < MAX_AUTO_ATTEMPTS) {
+        runAnalysis(queued.name, {
+          updateUrl: false,
+          attempt: queued.attempt + 1,
+        });
+      }
+    }, 250);
+
+    return () => clearInterval(timer);
+  }, [queued, runAnalysis]);
 
   const totalPosts = stats.positive + stats.neutral + stats.negative;
 
@@ -250,7 +300,6 @@ export default function App() {
 
   const onSubmit = (e) => {
     e.preventDefault();
-    if (cooldown > 0) return;
     runAnalysis(subreddit);
   };
 
@@ -295,7 +344,7 @@ export default function App() {
     },
   }[overallVibe];
 
-  const buttonLabel = cooldown > 0 ? `Retry in ${cooldown}s` : "Analyze vibe";
+  const buttonLabel = "Analyze vibe";
   const showLanding = !loading && posts.length === 0;
 
   return (
@@ -328,6 +377,7 @@ export default function App() {
                 setAnalyzed("");
                 setStats(EMPTY_STATS);
                 setError("");
+                setQueued(null);
               }}
               className="mb-5 inline-flex items-center gap-2 rounded-full border border-brand-200 bg-white/80 px-4 py-1.5 text-sm font-medium text-brand-700 shadow-sm backdrop-blur transition hover:bg-brand-50"
             >
@@ -381,7 +431,7 @@ export default function App() {
 
             <button
               type="submit"
-              disabled={loading || cooldown > 0}
+              disabled={loading}
               className="flex h-13 items-center justify-center gap-2 rounded-xl bg-brand-600 px-6 py-3.5 font-semibold text-white shadow-sm transition hover:bg-brand-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-55"
             >
               {loading ? (
@@ -449,6 +499,22 @@ export default function App() {
         {/* Loading */}
         {loading && (
           <VibeLoader subreddit={subreddit.trim().replace(/^\/?r\//i, "") || "reddit"} />
+        )}
+
+        {/* Waiting for Reddit's next rate-limit slot */}
+        {!loading && queued && (
+          <RateLimitWait
+            queued={queued}
+            now={now}
+            autoRetry={queued.attempt < MAX_AUTO_ATTEMPTS}
+            onRetryNow={() =>
+              runAnalysis(queued.name, { updateUrl: false, attempt: 1 })
+            }
+            onCancel={() => {
+              setQueued(null);
+              pushSubredditUrl(null);
+            }}
+          />
         )}
 
         {/* Dashboard */}

@@ -15,12 +15,10 @@ const CACHE_MAX_ENTRIES = 500; // hard cap so the map cannot grow without bound
 // Deduplicate concurrent in-flight requests for the same subreddit
 const inFlightRequests = new Map();
 
-// Anonymous RSS access is rate-limited aggressively: firing requests back to
-// back gets the whole server throttled, which looks to users like only some
-// subreddits "work". Serialize outbound calls and keep a minimum gap between
-// them. OAuth allows 100/min, so the gap only needs to be large without it.
-const MIN_UPSTREAM_GAP_MS = Number(process.env.REDDIT_MIN_GAP_MS) || 1500;
-const RATE_LIMIT_RETRIES = 1;
+// Serialize outbound calls with a small gap so concurrent lookups are sent one
+// at a time. That matters less for spacing than for ordering: each response
+// updates the budget below before the next call checks it.
+const MIN_UPSTREAM_GAP_MS = Number(process.env.REDDIT_MIN_GAP_MS) || 250;
 
 let upstreamChain = Promise.resolve();
 let lastUpstreamAt = 0;
@@ -28,36 +26,69 @@ let lastUpstreamAt = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Circuit breaker for Reddit's IP-wide rate limit.
+ * Reddit's rate-limit budget, as Reddit itself reports it.
  *
- * When Reddit says "wait 55 seconds" it means the whole server, not one
- * subreddit. Continuing to call during that window burns more of the budget
- * and makes every queued request wait behind doomed calls, so the breaker
- * short-circuits: cached posts if we have them, an honest wait time if not.
+ * Every Reddit response carries x-ratelimit-remaining and x-ratelimit-reset,
+ * successful ones included. Measured anonymously, the RSS budget is a single
+ * request per ~60s window: a 200 comes back with "remaining: 0, reset: 57",
+ * so the very next lookup is guaranteed to 429. Reading the headers on every
+ * response lets the server know when the next slot opens instead of finding
+ * out by failing, and lets it tell the client the exact wait.
+ *
+ * OAuth and RSS have separate budgets, so they are tracked separately.
  */
-let rateLimitedUntil = 0;
-const MAX_BREAKER_MS = 120 * 1000;
+const blockedUntil = { rss: 0, oauth: 0 };
+// Never trust a reset longer than this; a bad header must not lock us out.
+const MAX_BLOCK_MS = 10 * 60 * 1000;
+// Arrive just after the window resets rather than racing it.
+const RESET_SAFETY_MS = 1000;
 
-function noteRateLimit(retryAfterSeconds) {
-  const waitMs = Math.min(
-    (Number(retryAfterSeconds) || 30) * 1000,
-    MAX_BREAKER_MS
-  );
-  const until = Date.now() + waitMs;
-  if (until > rateLimitedUntil) {
-    rateLimitedUntil = until;
+function blockFor(kind, seconds, reason) {
+  const ms = Math.min(Math.max(seconds, 0) * 1000 + RESET_SAFETY_MS, MAX_BLOCK_MS);
+  const until = Date.now() + ms;
+  if (until > blockedUntil[kind]) {
+    blockedUntil[kind] = until;
     console.warn(
-      `Reddit rate limit tripped; pausing upstream calls for ${Math.round(
-        waitMs / 1000
-      )}s`
+      `Reddit ${kind} budget ${reason}; next slot in ${Math.ceil(ms / 1000)}s`
     );
   }
 }
 
-/** Seconds left on the breaker, or 0 when upstream calls are allowed. */
-function breakerSecondsLeft() {
-  const left = rateLimitedUntil - Date.now();
+/** Records the budget Reddit reports on any response, success or failure. */
+function noteRateHeaders(kind, response) {
+  const remaining = parseFloat(response.headers.get("x-ratelimit-remaining"));
+  const reset = parseFloat(response.headers.get("x-ratelimit-reset"));
+
+  if (response.status === 429) {
+    const retryAfter = parseFloat(response.headers.get("retry-after"));
+    const seconds = Number.isFinite(reset)
+      ? reset
+      : Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter
+        : 60;
+    blockFor(kind, seconds, "exceeded (429)");
+    return;
+  }
+
+  if (Number.isFinite(remaining) && remaining < 1 && Number.isFinite(reset)) {
+    blockFor(kind, reset, "used up");
+  }
+}
+
+/** Seconds until `kind` may call Reddit again, or 0 when a slot is free. */
+function secondsUntilSlot(kind) {
+  const left = blockedUntil[kind] - Date.now();
   return left > 0 ? Math.ceil(left / 1000) : 0;
+}
+
+/** A result that says "no slot yet" without touching Reddit. */
+function noSlot(seconds) {
+  return {
+    success: false,
+    status: 429,
+    rateLimited: true,
+    retryAfterSeconds: seconds,
+  };
 }
 
 /**
@@ -188,6 +219,9 @@ async function fetchViaOAuth(subreddit, token) {
     process.env.REDDIT_USER_AGENT ||
     "web:subreddit-vibe-check:v1.0 (by /u/Human_Point_4829)";
 
+  const wait = secondsUntilSlot("oauth");
+  if (wait > 0) return noSlot(wait);
+
   const response = await fetch(
     `https://oauth.reddit.com/r/${encodeURIComponent(subreddit)}/hot?limit=50`,
     {
@@ -200,6 +234,7 @@ async function fetchViaOAuth(subreddit, token) {
   );
 
   console.log("Reddit OAuth response status:", response.status);
+  noteRateHeaders("oauth", response);
 
   if (!response.ok) {
     // A revoked or stale token should not poison every later request.
@@ -306,38 +341,12 @@ export function looksLikeFeed(xml) {
 }
 
 /**
- * Fetch posts via RSS, retrying briefly when Reddit reports a rate limit.
- * A short wait usually clears it, which keeps a cold subreddit from failing
- * just because another request went out moments earlier.
+ * Fetch posts via RSS (www.reddit.com, then old.reddit.com for non-rate-limit
+ * failures). There is deliberately no in-request retry: the budget resets
+ * about a minute after it is spent, so the right move is to report the exact
+ * wait and let the client come back, not to hold the connection open.
  */
 async function fetchViaRSS(subreddit) {
-  let result = await attemptRSS(subreddit);
-
-  for (let attempt = 0; attempt < RATE_LIMIT_RETRIES; attempt++) {
-    if (!result.rateLimited) break;
-
-    // Only a very short hint is worth waiting out inside the request. Reddit
-    // typically asks for ~55s, and retrying into that window spends more of
-    // the budget while holding the user's connection open for nothing.
-    const hinted = Number(result.retryAfterSeconds) || 0;
-    if (hinted > 3) break;
-
-    console.log(`Rate limited on ${subreddit}; one short retry`);
-    await sleep(1500);
-    result = await attemptRSS(subreddit);
-  }
-
-  if (result.rateLimited) {
-    noteRateLimit(result.retryAfterSeconds);
-  }
-
-  return result;
-}
-
-/**
- * One pass over the RSS endpoints (www.reddit.com then old.reddit.com)
- */
-async function attemptRSS(subreddit) {
   const endpoints = [
     `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/hot.rss?limit=50`,
     `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/hot.rss?limit=50`,
@@ -345,17 +354,20 @@ async function attemptRSS(subreddit) {
 
   let lastStatus = 500;
   let lastError = null;
-  let rateLimited = false;
   let blocked = false;
-  let retryAfterSeconds = null;
 
   for (const url of endpoints) {
     try {
       console.log(`Attempting RSS fetch from: ${url}`);
       const userAgent = getRandomUserAgent();
 
-      const response = await scheduleUpstream(() =>
-        fetch(url, {
+      // The slot check runs inside the queue, right before the call, so a
+      // response that just used up the budget is seen by the next caller.
+      const response = await scheduleUpstream(async () => {
+        const wait = secondsUntilSlot("rss");
+        if (wait > 0) return { noSlotFor: wait };
+
+        const res = await fetch(url, {
           headers: {
             "User-Agent": userAgent,
             Accept:
@@ -364,8 +376,12 @@ async function attemptRSS(subreddit) {
             "Cache-Control": "no-cache",
           },
           signal: AbortSignal.timeout(10000),
-        })
-      );
+        });
+        noteRateHeaders("rss", res);
+        return res;
+      });
+
+      if (response.noSlotFor) return noSlot(response.noSlotFor);
 
       lastStatus = response.status;
       console.log(`Reddit RSS status (${url}):`, response.status);
@@ -381,17 +397,12 @@ async function attemptRSS(subreddit) {
         };
       }
 
+      // noteRateHeaders has already recorded when the window resets. Do not
+      // fall through to old.reddit.com: in every measured case it answered a
+      // rate-limited request with its generic bot-gate page, so the extra
+      // call only adds latency.
       if (response.status === 429) {
-        rateLimited = true;
-        const resetHeader =
-          response.headers.get("retry-after") ||
-          response.headers.get("x-ratelimit-reset");
-        if (resetHeader) {
-          const parsed = parseInt(resetHeader, 10);
-          if (!isNaN(parsed)) retryAfterSeconds = parsed;
-        }
-        // Try fallback endpoint
-        continue;
+        return noSlot(secondsUntilSlot("rss") || 60);
       }
 
       const xml = await response.text();
@@ -428,9 +439,10 @@ async function attemptRSS(subreddit) {
       if (!looksLikeFeed(xml)) {
         const verdict = classifyNonFeedBody(xml, subreddit);
 
+        // Reddit's over-limit HTML page carries no budget headers to read.
         if (verdict?.rateLimited) {
-          rateLimited = true;
-          continue;
+          blockFor("rss", 60, "exceeded (over-limit page)");
+          return noSlot(secondsUntilSlot("rss"));
         }
 
         if (verdict) return verdict;
@@ -485,17 +497,6 @@ async function attemptRSS(subreddit) {
     }
   }
 
-  if (rateLimited) {
-    return {
-      success: false,
-      status: 429,
-      rateLimited: true,
-      retryAfterSeconds,
-      error:
-        "Reddit is temporarily rate-limiting requests. Please try again in a few moments.",
-    };
-  }
-
   // Every endpoint was blocked or unparseable. That is an upstream
   // availability problem, so do not claim the subreddit does not exist.
   if (blocked) {
@@ -514,6 +515,24 @@ async function attemptRSS(subreddit) {
     status: lastStatus >= 400 ? lastStatus : 502,
     error: lastError || "Failed to fetch subreddit from Reddit",
   };
+}
+
+/**
+ * 429 with the exact wait, in a shape the client can count down and retry
+ * from. `limitedBy` lets the client explain why: the anonymous budget is a
+ * single lookup a minute for the whole server.
+ */
+function sendRateLimited(res, seconds, usingOAuth) {
+  const retryAfter = Math.max(1, Math.ceil(seconds));
+  res.set("Retry-After", String(retryAfter));
+  return res.status(429).json({
+    error: usingOAuth
+      ? `Reddit's API budget is used up for the moment. The next lookup opens in about ${retryAfter} seconds.`
+      : `Reddit allows this server one lookup a minute without API keys. The next one opens in about ${retryAfter} seconds.`,
+    retryAfter,
+    reason: "reddit_rate_limit",
+    limitedBy: usingOAuth ? "oauth" : "anonymous",
+  });
 }
 
 export const getSubreddit = async (req, res) => {
@@ -552,15 +571,17 @@ export const getSubreddit = async (req, res) => {
       });
     }
 
-    // 2. Rate limit breaker: while Reddit is throttling this server there is
-    // nothing to gain from calling it again, so answer from cache or say how
-    // long to wait. OAuth has its own generous budget and is left alone.
+    // 2. No free slot: when Reddit has already said the budget is spent, a
+    // call can only fail, so answer from cache or with the exact wait without
+    // queueing behind other upstream calls.
     const usingOAuth = Boolean(
       process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET
     );
-    const breakerWait = usingOAuth ? 0 : breakerSecondsLeft();
+    const slotWait = usingOAuth
+      ? Math.min(secondsUntilSlot("oauth"), secondsUntilSlot("rss"))
+      : secondsUntilSlot("rss");
 
-    if (breakerWait > 0 && !inFlightRequests.has(cacheKey)) {
+    if (slotWait > 0 && !inFlightRequests.has(cacheKey)) {
       if (
         cachedEntry &&
         cachedEntry.posts?.length > 0 &&
@@ -578,10 +599,7 @@ export const getSubreddit = async (req, res) => {
         });
       }
 
-      return res.status(429).json({
-        error: `Reddit is rate-limiting this server. Please try again in about ${breakerWait} seconds.`,
-        retryAfter: breakerWait,
-      });
+      return sendRateLimited(res, slotWait, usingOAuth);
     }
 
     // 3. In-flight request deduplication to prevent hammering Reddit with concurrent duplicate queries
@@ -657,14 +675,11 @@ export const getSubreddit = async (req, res) => {
 
     // 6. Rate limit hit without cached fallback
     if (result.rateLimited || result.status === 429) {
-      const waitMessage = result.retryAfterSeconds
-        ? ` Please try again in about ${result.retryAfterSeconds} seconds.`
-        : " Please wait a few seconds and try again.";
-
-      return res.status(429).json({
-        error: `Reddit is temporarily rate-limiting requests.${waitMessage}`,
-        retryAfter: result.retryAfterSeconds || 15,
-      });
+      return sendRateLimited(
+        res,
+        result.retryAfterSeconds || secondsUntilSlot("rss") || 60,
+        usingOAuth
+      );
     }
 
     // 7. Other errors (e.g. 403 private, 404 not found)
